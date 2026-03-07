@@ -1,0 +1,53 @@
+# Liveness API - Docker Compose (uv-based, InsightFace + Anti-spoof)
+# Run:   docker compose build && docker compose up
+# Or:    docker-compose up --build   (if you have standalone docker-compose)
+# Or:    ./scripts/docker-up.sh
+# API:   http://localhost:8000/docs
+
+services:
+  liveness-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Anti-spoof ONNX is downloaded at build (default URL). Override to use a different model:
+      # args:
+      #   ANTISPOOF_MODEL_URL: "https://..."
+    image: liveness-api:latest
+    container_name: liveness-api
+    ports:
+      - "8082:8000"
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      # Anti-spoof: dual crop = also run on large context (face+scene), use min score to catch photo/screen
+      - ANTISPOOF_ENABLED=true
+      - ANTISPOOF_MODEL_PATH=/app/models/antispoof.onnx
+      - ANTISPOOF_REAL_THRESHOLD=0.6
+      - ANTISPOOF_WEIGHT=0.5
+      - ANTISPOOF_REAL_INDEX=0
+      - ANTISPOOF_CROP_PADDING_RATIO=0.5
+      - ANTISPOOF_MIN_LOGIT_DIFF=0.5
+      - ANTISPOOF_DUAL_CROP=true
+      - ANTISPOOF_CONTEXT_PADDING_RATIO=2.0
+      # CPU only (no CUDA warning). Set USE_GPU=1 if you have GPU and onnxruntime-gpu.
+      - USE_GPU=0
+      # Optional: override host/port if needed
+      # - HOST=0.0.0.0
+      # - PORT=8000
+    # No volumes: models are baked in at build time. Optional: add - ./models:/app/models:ro for antispoof.onnx
+    # Memory: avoid OOM (exit 137) when loading models. With plain `docker compose up`, deploy is ignored:
+    # give the container more RAM (e.g. Docker Desktop → Settings → Memory ≥ 4GB) or run:
+    #   docker compose --compatibility up
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+    restart: unless-stopped
