@@ -15,7 +15,7 @@ services:
     image: liveness-api:latest
     container_name: liveness-api
     ports:
-      - "8082:8000"
+      - "${PORT:-8082}:8000"
     environment:
       - ENVIRONMENT=production
       - LOG_LEVEL=INFO
