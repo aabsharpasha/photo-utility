@@ -1,22 +1,24 @@
-# Liveness API - Docker Compose (uv-based, InsightFace + Anti-spoof)
+# Liveness API - Docker Compose (LOCAL ONLY; not used by Railway)
 # Run:   docker compose build && docker compose up
-# Or:    docker-compose up --build   (if you have standalone docker-compose)
 # Or:    ./scripts/docker-up.sh
-# API:   http://localhost:8000/docs
+# API:   http://localhost:8082/docs
+#
+# Railway: Railway does NOT use this file. It runs the Dockerfile and sets PORT;
+# the app listens on $PORT (see Dockerfile CMD). So 8082:8000 below does not affect Railway.
 
 services:
   liveness-api:
     build:
       context: .
       dockerfile: Dockerfile
-      # Anti-spoof ONNX is downloaded at build (default URL). Override to use a different model:
       # args:
       #   ANTISPOOF_MODEL_URL: "https://..."
     image: liveness-api:latest
     container_name: liveness-api
     ports:
-      - "${PORT:-8082}:8000"
+      - "8082:8000"   # local only: host 8082 -> container 8000
     environment:
+      - PORT=8000     # so app listens on 8000 in container for this mapping
       - ENVIRONMENT=production
       - LOG_LEVEL=INFO
       # Anti-spoof: dual crop = also run on large context (face+scene), use min score to catch photo/screen
@@ -45,7 +47,7 @@ services:
         reservations:
           memory: 1G
     healthcheck:
-      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request, os; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8000') + '/api/health')"]
       interval: 30s
       timeout: 10s
       start_period: 90s

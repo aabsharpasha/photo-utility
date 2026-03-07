@@ -57,7 +57,8 @@ ENV INSIGHTFACE_HOME=/app/.insightface
 EXPOSE 8000
 
 # Run via venv Python so uvicorn is found regardless of venv layout/symlinks
+# Use shell so PORT is expanded (Railway sets PORT; default 8000 for docker-compose).
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
-    CMD /app/.venv/bin/python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')" || exit 1
+    CMD /bin/sh -c '/app/.venv/bin/python -c "import urllib.request, os; urllib.request.urlopen(\"http://127.0.0.1:\" + os.environ.get(\"PORT\", \"8000\") + \"/api/health\")"' || exit 1
 
-CMD ["/app/.venv/bin/python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "${PORT:-8000}"]
+CMD ["/bin/sh", "-c", "exec /app/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
