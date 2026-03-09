@@ -46,9 +46,9 @@ class Settings(BaseSettings):
 
     # Liveness thresholds
     laplacian_min: float = Field(
-        default=35.0,
+        default=25.0,
         ge=0,
-        description="Min Laplacian variance for sharpness (50–80=strict, 35=webcam-friendly)",
+        description="Min Laplacian variance for sharpness (50–80=strict, 25–35=webcam-friendly)",
     )
     face_area_min_ratio: float = Field(
         default=0.02,

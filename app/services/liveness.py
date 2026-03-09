@@ -19,8 +19,12 @@ import numpy as np
 
 def _to_native(x: Any) -> Any:
     """Convert numpy scalars/arrays in structures to native Python for JSON serialization."""
+    # Scalars
     if isinstance(x, (np.floating, np.integer)):
         return float(x) if isinstance(x, np.floating) else int(x)
+    if isinstance(x, (np.bool_,)):
+        return bool(x)
+    # Arrays / containers
     if isinstance(x, np.ndarray):
         return x.tolist()
     if isinstance(x, dict):

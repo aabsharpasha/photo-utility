@@ -19,6 +19,16 @@ class LivenessRequest(BaseModel):
     }
 
 
+class MotionLivenessRequest(BaseModel):
+    """Input for motion-based liveness: multiple frames (base64)."""
+
+    frames: list[str] = Field(
+        ...,
+        min_length=2,
+        description="At least 2 base64-encoded images (JPEG/PNG) captured in sequence.",
+    )
+
+
 class LivenessResponse(BaseModel):
     """Liveness check result."""
 

@@ -21,15 +21,16 @@ services:
       - PORT=8000     # so app listens on 8000 in container for this mapping
       - ENVIRONMENT=production
       - LOG_LEVEL=INFO
-      # Anti-spoof: dual crop = also run on large context (face+scene), use min score to catch photo/screen
+      # Liveness: tuned for real webcam/mobile selfies (webcam-friendly blur; anti-spoof on face crop only)
+      - LAPLACIAN_MIN=25
       - ANTISPOOF_ENABLED=true
       - ANTISPOOF_MODEL_PATH=/app/models/antispoof.onnx
       - ANTISPOOF_REAL_THRESHOLD=0.6
       - ANTISPOOF_WEIGHT=0.5
       - ANTISPOOF_REAL_INDEX=0
       - ANTISPOOF_CROP_PADDING_RATIO=0.5
-      - ANTISPOOF_MIN_LOGIT_DIFF=0.5
-      - ANTISPOOF_DUAL_CROP=true
+      - ANTISPOOF_MIN_LOGIT_DIFF=0.0      # disable extra logit_diff gate; rely on real_threshold
+      - ANTISPOOF_DUAL_CROP=false         # use only face crop; more stable for real users
       - ANTISPOOF_CONTEXT_PADDING_RATIO=2.0
       # CPU only (no CUDA warning). Set USE_GPU=1 if you have GPU and onnxruntime-gpu.
       - USE_GPU=0
@@ -46,10 +47,4 @@ services:
           memory: 2G
         reservations:
           memory: 1G
-    healthcheck:
-      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request, os; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8000') + '/api/health')"]
-      interval: 30s
-      timeout: 10s
-      start_period: 90s
-      retries: 3
-    restart: unless-stopped
+    # No Docker healthcheck here; use external probes or call /api/health manually if needed.
