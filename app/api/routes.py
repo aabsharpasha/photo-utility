@@ -12,6 +12,7 @@ from app.api.schemas import (
     MotionLivenessRequest,
 )
 from app.config import get_settings
+from app.deps import require_api_key_query
 from app.logging_config import get_logger, log_extra
 from app.services.liveness import LivenessService, decode_image, get_liveness_service, _to_native
 from app.services.face_match import FaceMatchService, get_face_match_service
@@ -66,6 +67,7 @@ async def liveness(
     request: Request,
     body: LivenessRequest,
     service: LivenessService = Depends(get_liveness_service),
+    _api_key: str = Depends(require_api_key_query),
 ) -> LivenessResponse:
     """Run liveness check on the provided image."""
     settings = get_settings()
@@ -103,6 +105,7 @@ async def liveness_motion(
     request: Request,
     body: MotionLivenessRequest,
     service: LivenessService = Depends(get_liveness_service),
+    _api_key: str = Depends(require_api_key_query),
 ) -> LivenessResponse:
     """Motion-based liveness: require multiple frames and detectable motion."""
     settings = get_settings()
@@ -211,6 +214,7 @@ async def face_match(
     request: Request,
     body: CompareFacesRequest,
     service: FaceMatchService = Depends(get_face_match_service),
+    _api_key: str = Depends(require_api_key_query),
 ) -> CompareFacesResponse:
     """
     Face match endpoint using InsightFace embeddings but Rekognition-style schema.
@@ -260,6 +264,7 @@ async def liveness_legacy(
     request: Request,
     body: LivenessRequest,
     service: LivenessService = Depends(get_liveness_service),
+    _api_key: str = Depends(require_api_key_query),
 ) -> LivenessResponse:
     """Legacy path: same as POST /v1/liveness."""
     return await liveness(request, body, service)

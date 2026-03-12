@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0", description="Bind host")
     port: int = Field(default=8000, ge=1, le=65535, description="Bind port")
     workers: int = Field(default=1, ge=1, description="Uvicorn workers (1 recommended for model)")
+    api_key_query_value: str = Field(
+        default="my-secret-api-key",
+        description="If set, require this API key in query parameter `api_key` for protected endpoints.",
+    )
 
     # InsightFace
     insightface_model: str = Field(default="buffalo_l", description="Model pack name")
