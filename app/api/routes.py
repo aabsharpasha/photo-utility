@@ -4,10 +4,17 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app import __version__
-from app.api.schemas import LivenessRequest, LivenessResponse, MotionLivenessRequest
+from app.api.schemas import (
+    CompareFacesRequest,
+    CompareFacesResponse,
+    LivenessRequest,
+    LivenessResponse,
+    MotionLivenessRequest,
+)
 from app.config import get_settings
 from app.logging_config import get_logger, log_extra
 from app.services.liveness import LivenessService, decode_image, get_liveness_service, _to_native
+from app.services.face_match import FaceMatchService, get_face_match_service
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -188,6 +195,58 @@ async def liveness_motion(
         details=_to_native(details),
         errors=[],
     )
+
+
+@router.post(
+    "/v1/face-match",
+    response_model=CompareFacesResponse,
+    tags=["face-match"],
+    summary="Compare faces (Rekognition-style)",
+    description=(
+        "Compare a source face against faces in a target image. "
+        "Request and response formats follow AWS Rekognition CompareFaces (subset)."
+    ),
+)
+async def face_match(
+    request: Request,
+    body: CompareFacesRequest,
+    service: FaceMatchService = Depends(get_face_match_service),
+) -> CompareFacesResponse:
+    """
+    Face match endpoint using InsightFace embeddings but Rekognition-style schema.
+    """
+    settings = get_settings()
+
+    # Enforce payload limits (Bytes are base64 strings)
+    for label, img in (("SourceImage", body.SourceImage), ("TargetImage", body.TargetImage)):
+        if len(img.Bytes.encode("utf-8")) > settings.max_image_size_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"{label} payload exceeds max size ({settings.max_image_size_bytes} bytes)",
+            )
+
+    src_img = decode_image(body.SourceImage.Bytes)
+    tgt_img = decode_image(body.TargetImage.Bytes)
+    if src_img is None:
+        raise HTTPException(status_code=400, detail="Invalid or unsupported SourceImage.Bytes")
+    if tgt_img is None:
+        raise HTTPException(status_code=400, detail="Invalid or unsupported TargetImage.Bytes")
+
+    similarity_threshold = body.SimilarityThreshold
+    result_dict = service.compare(src_img, tgt_img, similarity_threshold=similarity_threshold)
+    result_dict["Match"] = len(result_dict.get("FaceMatches") or []) > 0
+
+    logger.info(
+        "face match",
+        extra=log_extra(
+            similarity_threshold=similarity_threshold,
+            source_face_present=bool(result_dict.get("SourceImageFace")),
+            match_count=len(result_dict.get("FaceMatches") or []),
+            match=result_dict["Match"],
+        ),
+    )
+
+    return CompareFacesResponse(**result_dict)
 
 
 # Alias for convenience
