@@ -79,8 +79,11 @@ class Settings(BaseSettings):
         description="Min InsightFace detection score to count a face",
     )
 
-    # Anti-spoof ONNX (MiniFAS-style, 128x128 RGB). Default False: real mobile selfies often fail otherwise.
-    antispoof_enabled: bool = Field(default=False, description="Use anti-spoof ONNX model")
+    # Anti-spoof ONNX (MiniFAS-style, 128x128 RGB).
+    antispoof_enabled: bool = Field(
+        default=True,
+        description="Use anti-spoof ONNX model (baked-in default: enabled).",
+    )
     antispoof_model_path: str = Field(
         default="/app/models/antispoof.onnx",
         description="Path to ONNX model file (or URL not used at runtime)",
@@ -121,8 +124,8 @@ class Settings(BaseSettings):
     )
     # Run anti-spoof on a second, large context crop (face + scene); use min(face_score, context_score). Catches photo/screen held to camera.
     antispoof_dual_crop: bool = Field(
-        default=True,
-        description="If True, also run on a large-context crop and use the minimum real_score (stricter).",
+        default=False,
+        description="If True, also run on a large-context crop and use the minimum real_score (stricter). Default False to match Docker config.",
     )
     antispoof_context_padding_ratio: float = Field(
         default=2.0,
