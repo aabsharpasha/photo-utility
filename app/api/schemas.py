@@ -1,6 +1,6 @@
 """Request/Response schemas for OpenAPI and validation."""
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -28,6 +28,14 @@ class MotionLivenessRequest(BaseModel):
         ...,
         min_length=2,
         description="Multiple base64-encoded images (JPEG/PNG) in sequence; minimum count is enforced server-side (default 3).",
+    )
+    challenge: Literal["none", "left-right", "right-left", "side-to-side"] = Field(
+        default="side-to-side",
+        description=(
+            "Optional challenge-response pattern for replay resistance. "
+            "'left-right' means frame2 should shift left from frame1 and frame3 shift right from frame2; "
+            "'right-left' is the opposite."
+        ),
     )
 
 

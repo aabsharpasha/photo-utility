@@ -142,7 +142,8 @@ class Settings(BaseSettings):
         le=2,
         description="Padding as ratio of face size (0.5 = 50%% each side). Use 0.5–1.0 to better detect photo/screen held to camera.",
     )
-    # SuriAI uses logit_diff = real_logit - spoof_logit; require this >= value to pass (stricter). Set to -999 to disable.
+    # SuriAI uses logit_diff = real_logit - spoof_logit; require this >= value to pass (stricter).
+    # Use `0` to disable the logit-margin gate.
     antispoof_min_logit_diff: float = Field(
         default=0.0,
         ge=-10,
@@ -179,24 +180,36 @@ class Settings(BaseSettings):
         default=True,
         description="If True, run large-context anti-spoof each motion frame (uses antispoof_dual_crop_strategy).",
     )
+    motion_face_area_min_ratio: float = Field(
+        default=0.008,
+        ge=0.0,
+        le=1.0,
+        description="Motion-only minimum face area ratio. Lower than global to allow slightly farther capture distance.",
+    )
+    motion_laplacian_min: float = Field(
+        default=12.0,
+        ge=0.0,
+        description="Motion-only minimum Laplacian sharpness. Lower than global to reduce distance/low-light false rejects.",
+    )
     motion_antispoof_real_threshold: float = Field(
-        default=0.52,
+        default=0.50,
         ge=0.0,
         le=1.0,
         description="Asymmetric: min face-crop 'real' score per motion frame (context has its own threshold).",
     )
     motion_antispoof_context_real_threshold: float = Field(
-        default=0.36,
+        default=0.015,
         ge=0.0,
         le=1.0,
         description="Asymmetric motion only: min context-crop 'real' score (override via check()).",
     )
     motion_antispoof_min_logit_diff: float = Field(
-        default=0.05,
+        default=0.0,
         ge=-10.0,
         le=10.0,
         description=(
-            "With asymmetric strategy, applied to face crop only. With min strategy, applied to both crops. "
+            "With asymmetric strategy, applied to both face and context crops for motion. "
+            "With min strategy, applied to both crops. "
             "0 disables logit gate."
         ),
     )
@@ -204,7 +217,20 @@ class Settings(BaseSettings):
         default=0.41,
         ge=0.0,
         le=1.0,
-        description="Min blended confidence per motion frame for that frame to count as live.",
+        description="Min blended confidence per motion frame for that frame to count as live (strict quorum).",
+    )
+    motion_relaxed_frame_quorum_enabled: bool = Field(
+        default=True,
+        description=(
+            "If True and motion_require_all_frames_live is False, also pass per-frame quorum when enough frames "
+            "have geometry + anti-spoof gates OK and confidence >= motion_relaxed_confidence_min (easier on real users)."
+        ),
+    )
+    motion_relaxed_confidence_min: float = Field(
+        default=0.28,
+        ge=0.0,
+        le=1.0,
+        description="Lower blended-confidence bar used only by motion_relaxed_frame_quorum (PAD/geometry unchanged).",
     )
     motion_require_all_frames_live: bool = Field(
         default=False,
@@ -214,7 +240,7 @@ class Settings(BaseSettings):
         ),
     )
     motion_min_frames_with_live_face: int = Field(
-        default=2,
+        default=3,
         ge=1,
         le=12,
         description="When motion_require_all_frames_live is False, min frames that pass per-frame liveness.",
@@ -227,7 +253,7 @@ class Settings(BaseSettings):
         ),
     )
     motion_moire_max_score: float = Field(
-        default=0.76,
+        default=0.72,
         ge=0.0,
         le=1.0,
         description=(
@@ -241,7 +267,7 @@ class Settings(BaseSettings):
         description="Minimum frames for motion liveness (3+ mimics multi-frame video-style checks).",
     )
     motion_min_normalized_shift: float = Field(
-        default=0.01,
+        default=0.02,
         ge=0.005,
         le=0.2,
         description="Min normalized face-center movement between frames (see motion_require_shift_all_consecutive_pairs).",

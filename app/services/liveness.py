@@ -142,6 +142,9 @@ class LivenessService:
         cv_img: np.ndarray,
         *,
         force_context_antispoof: bool = False,
+        context_antispoof_enabled_override: bool | None = None,
+        face_area_min_ratio_override: float | None = None,
+        laplacian_min_override: float | None = None,
         antispoof_real_threshold_override: float | None = None,
         antispoof_context_real_threshold_override: float | None = None,
         antispoof_min_logit_diff_override: float | None = None,
@@ -176,6 +179,16 @@ class LivenessService:
                 else self._settings.antispoof_context_real_threshold
             )
             strategy = self._settings.antispoof_dual_crop_strategy
+            face_area_min_ratio = (
+                face_area_min_ratio_override
+                if face_area_min_ratio_override is not None
+                else self._settings.face_area_min_ratio
+            )
+            laplacian_min = (
+                laplacian_min_override
+                if laplacian_min_override is not None
+                else self._settings.laplacian_min
+            )
 
             # 1) Sharpness (anti-blur / anti-print)
             gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
@@ -183,8 +196,8 @@ class LivenessService:
             result.details["laplacian_variance"] = round(lap_var, 2)
             sharpness = min(
                 1.0,
-                lap_var / self._settings.laplacian_min,
-            ) if self._settings.laplacian_min > 0 else 1.0
+                lap_var / laplacian_min,
+            ) if laplacian_min > 0 else 1.0
             result.details["sharpness_score"] = round(sharpness, 4)
 
             # 2) Face detection via InsightFace (Direct)
@@ -219,8 +232,8 @@ class LivenessService:
                 face_ratio = 0.0
             result.details["largest_face_area_ratio"] = round(face_ratio, 4)
 
-            size_ok = face_ratio >= self._settings.face_area_min_ratio
-            sharp_ok = lap_var >= self._settings.laplacian_min
+            size_ok = face_ratio >= face_area_min_ratio
+            sharp_ok = lap_var >= laplacian_min
 
             # Heuristic component: sharpness + size + detection score
             size_component = min(1.0, face_ratio / 0.1) if size_ok else 0.0
@@ -266,10 +279,16 @@ class LivenessService:
                     result.details.update(antispoof_details)
                     antispoof_used = antispoof_details.get("antispoof") == "enabled"
                     face_ld = antispoof_details.get("antispoof_logit_diff")
-                    if antispoof_used and logit_min > -999 and face_ld is not None:
+                    # logit_min == 0 means "disable logit margin gate" (more production-friendly than
+                    # relying on an out-of-range sentinel value).
+                    if antispoof_used and abs(float(logit_min)) > 1e-9 and face_ld is not None:
                         face_logit_ok = bool(face_ld >= logit_min)
 
-                    use_ctx = bool(self._settings.antispoof_dual_crop or force_context_antispoof)
+                    if context_antispoof_enabled_override is not None:
+                        # Motion-specific switch: can disable context PAD even if global antispoof_dual_crop=True.
+                        use_ctx = bool(context_antispoof_enabled_override)
+                    else:
+                        use_ctx = bool(self._settings.antispoof_dual_crop or force_context_antispoof)
                     if antispoof_used and use_ctx:
                         ctx_ratio = getattr(self._settings, "antispoof_context_padding_ratio", 2.0)
                         pad_ctx = int(max(face_w, face_h) * ctx_ratio)
@@ -287,13 +306,18 @@ class LivenessService:
                                 )
                                 ctx_ld = ctx_details.get("antispoof_logit_diff")
                                 ctx_logit_ok = True
-                                if strategy == "min" and logit_min > -999 and ctx_ld is not None:
+                                if strategy == "min" and abs(float(logit_min)) > 1e-9 and ctx_ld is not None:
                                     ctx_logit_ok = bool(ctx_ld >= logit_min)
 
                                 if strategy == "asymmetric":
                                     pass_face = bool(face_real >= real_thr and face_logit_ok)
-                                    # Context: score gate only (logit is noisy on scene); min mode uses ctx_logit_ok below
-                                    pass_ctx = bool(ctx_real >= ctx_thr)
+                                    # Context gate:
+                                    # - Always require context score >= threshold.
+                                    # - Additionally apply logit-margin when enabled to better reject screen/video replays.
+                                    pass_ctx_logit = True
+                                    if abs(float(logit_min)) > 1e-9 and ctx_ld is not None:
+                                        pass_ctx_logit = bool(ctx_ld >= logit_min)
+                                    pass_ctx = bool(ctx_real >= ctx_thr and pass_ctx_logit)
                                     antispoof_real = 0.5 * (face_real + ctx_real)
                                     spoof_gate_ok = pass_face and pass_ctx
                                     result.details["antispoof_dual_crop_strategy"] = "asymmetric"
@@ -308,20 +332,32 @@ class LivenessService:
                                     antispoof_real = m
                                     spoof_gate_ok = m >= real_thr
                                     result.details["antispoof_dual_crop_strategy"] = "min"
+                                    result.details["antispoof_face_gate_ok"] = bool(
+                                        face_real >= real_thr and face_logit_ok
+                                    )
+                                    result.details["antispoof_context_gate_ok"] = bool(
+                                        ctx_real >= real_thr and ctx_logit_ok
+                                    )
                             else:
                                 # Context region empty — fall back to face-only gating
                                 antispoof_real = face_real if face_logit_ok else 0.0
                                 spoof_gate_ok = bool(face_real >= real_thr and face_logit_ok)
                                 result.details["antispoof_dual_crop_strategy"] = f"{strategy}_no_context_crop"
+                                result.details["antispoof_face_gate_ok"] = spoof_gate_ok
+                                result.details["antispoof_context_gate_ok"] = True
                         else:
                             antispoof_real = face_real if face_logit_ok else 0.0
                             spoof_gate_ok = bool(face_real >= real_thr and face_logit_ok)
                             result.details["antispoof_dual_crop_strategy"] = f"{strategy}_no_context_bounds"
+                            result.details["antispoof_face_gate_ok"] = spoof_gate_ok
+                            result.details["antispoof_context_gate_ok"] = True
                     else:
                         # Face crop only
                         antispoof_real = face_real if face_logit_ok else 0.0
                         spoof_gate_ok = antispoof_real >= real_thr
                         result.details["antispoof_dual_crop_strategy"] = "face_only"
+                        result.details["antispoof_face_gate_ok"] = spoof_gate_ok
+                        result.details["antispoof_context_gate_ok"] = True
 
             # Blend: antispoof_weight * antispoof_real + (1 - antispoof_weight) * heuristic
             w = self._settings.antispoof_weight if antispoof_used else 0.0
@@ -361,6 +397,8 @@ class LivenessService:
                 if liveness_confidence_threshold_override is not None
                 else self._settings.liveness_confidence_threshold
             )
+            result.details["frame_geometry_ok"] = bool(sharp_ok and size_ok)
+            result.details["antispoof_spoof_gate_ok"] = bool(not antispoof_used or spoof_gate_ok)
             result.live = (
                 result.confidence >= live_conf_thr
                 and sharp_ok
