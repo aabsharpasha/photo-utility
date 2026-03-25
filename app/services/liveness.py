@@ -10,7 +10,6 @@ from __future__ import annotations
 import base64
 import os
 import sys
-import traceback
 from typing import Any
 
 import cv2
@@ -44,8 +43,8 @@ _face_app: Any = None
 
 
 def _onnx_providers() -> list[str]:
-    """Use CPU only unless USE_GPU=1, to avoid CUDA warning and OOM in Docker."""
-    if os.environ.get("USE_GPU", "").strip().lower() in ("1", "true", "yes"):
+    """Use CPU unless settings.use_gpu and CUDA provider is available."""
+    if get_settings().use_gpu:
         try:
             import onnxruntime as ort
             available = set(ort.get_available_providers())
@@ -138,10 +137,22 @@ class LivenessService:
     def __init__(self) -> None:
         self._settings = get_settings()
 
-    def check(self, cv_img: np.ndarray) -> LivenessResult:
+    def check(
+        self,
+        cv_img: np.ndarray,
+        *,
+        force_context_antispoof: bool = False,
+        antispoof_real_threshold_override: float | None = None,
+        antispoof_context_real_threshold_override: float | None = None,
+        antispoof_min_logit_diff_override: float | None = None,
+        liveness_confidence_threshold_override: float | None = None,
+    ) -> LivenessResult:
         """
         Run liveness check on a single BGR image.
         Uses InsightFace for face detection and sharpness/size heuristics for liveness.
+
+        force_context_antispoof: run anti-spoof on large scene crop (min with face crop score).
+        Overrides apply to anti-spoof gating and/or live gate (e.g. motion sequence per-frame).
         """
         result = LivenessResult()
         if cv_img is None or cv_img.size == 0:
@@ -149,6 +160,23 @@ class LivenessService:
             return result
 
         try:
+            real_thr = (
+                antispoof_real_threshold_override
+                if antispoof_real_threshold_override is not None
+                else self._settings.antispoof_real_threshold
+            )
+            logit_min = (
+                antispoof_min_logit_diff_override
+                if antispoof_min_logit_diff_override is not None
+                else self._settings.antispoof_min_logit_diff
+            )
+            ctx_thr = (
+                antispoof_context_real_threshold_override
+                if antispoof_context_real_threshold_override is not None
+                else self._settings.antispoof_context_real_threshold
+            )
+            strategy = self._settings.antispoof_dual_crop_strategy
+
             # 1) Sharpness (anti-blur / anti-print)
             gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
             lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
@@ -205,9 +233,16 @@ class LivenessService:
                 heuristic_conf *= 0.7
             result.details["heuristic_confidence"] = round(heuristic_conf, 4)
 
-            # Anti-spoof ONNX on cropped face (larger padding = more context to detect photo/screen held to camera)
+            # Anti-spoof ONNX on face crop + optional large context (dual crop).
             antispoof_real = 0.0
             antispoof_used = False
+            spoof_gate_ok = True
+            pass_face = True
+            pass_ctx = True
+            face_real = 0.0
+            ctx_real: float | None = None
+            face_logit_ok = True
+            use_ctx = False
             if self._settings.antispoof_enabled and bbox is not None:
                 # Normalize bbox so x1<=x2, y1<=y2 (InsightFace can sometimes return inverted coords)
                 x1, y1, x2, y2 = map(float, bbox[:4])
@@ -227,18 +262,15 @@ class LivenessService:
                 else:
                     crop = np.array([])
                 if crop.size > 0:
-                    antispoof_real, antispoof_details = run_antispoof(crop)
+                    face_real, antispoof_details = run_antispoof(crop)
                     result.details.update(antispoof_details)
                     antispoof_used = antispoof_details.get("antispoof") == "enabled"
-                    # Optional: require min logit_diff (SuriAI-style) for stricter spoof rejection
-                    if antispoof_used and self._settings.antispoof_min_logit_diff > -999:
-                        min_logit_diff = self._settings.antispoof_min_logit_diff
-                        logit_diff = antispoof_details.get("antispoof_logit_diff", 0.0)
-                        if logit_diff < min_logit_diff:
-                            antispoof_real = 0.0  # Force fail so result.live is False
+                    face_ld = antispoof_details.get("antispoof_logit_diff")
+                    if antispoof_used and logit_min > -999 and face_ld is not None:
+                        face_logit_ok = bool(face_ld >= logit_min)
 
-                    # Dual crop: also run on large-context crop (face + scene); use min score so photo/screen edges can trigger spoof
-                    if antispoof_used and getattr(self._settings, "antispoof_dual_crop", False):
+                    use_ctx = bool(self._settings.antispoof_dual_crop or force_context_antispoof)
+                    if antispoof_used and use_ctx:
                         ctx_ratio = getattr(self._settings, "antispoof_context_padding_ratio", 2.0)
                         pad_ctx = int(max(face_w, face_h) * ctx_ratio)
                         x1_ctx = max(0, x1 - pad_ctx)
@@ -250,11 +282,46 @@ class LivenessService:
                             if crop_ctx.size > 0:
                                 ctx_real, ctx_details = run_antispoof(crop_ctx)
                                 result.details["antispoof_context_real_score"] = round(ctx_real, 4)
-                                result.details["antispoof_context_logit_diff"] = ctx_details.get("antispoof_logit_diff")
-                                antispoof_real = min(antispoof_real, ctx_real)
-                                if ctx_details.get("antispoof_logit_diff") is not None and self._settings.antispoof_min_logit_diff > -999:
-                                    if ctx_details["antispoof_logit_diff"] < self._settings.antispoof_min_logit_diff:
-                                        antispoof_real = 0.0
+                                result.details["antispoof_context_logit_diff"] = ctx_details.get(
+                                    "antispoof_logit_diff"
+                                )
+                                ctx_ld = ctx_details.get("antispoof_logit_diff")
+                                ctx_logit_ok = True
+                                if strategy == "min" and logit_min > -999 and ctx_ld is not None:
+                                    ctx_logit_ok = bool(ctx_ld >= logit_min)
+
+                                if strategy == "asymmetric":
+                                    pass_face = bool(face_real >= real_thr and face_logit_ok)
+                                    # Context: score gate only (logit is noisy on scene); min mode uses ctx_logit_ok below
+                                    pass_ctx = bool(ctx_real >= ctx_thr)
+                                    antispoof_real = 0.5 * (face_real + ctx_real)
+                                    spoof_gate_ok = pass_face and pass_ctx
+                                    result.details["antispoof_dual_crop_strategy"] = "asymmetric"
+                                    result.details["antispoof_context_threshold_used"] = round(ctx_thr, 4)
+                                    result.details["antispoof_face_gate_ok"] = pass_face
+                                    result.details["antispoof_context_gate_ok"] = pass_ctx
+                                else:
+                                    # min: strict min of scores; logit must pass on both crops when enabled
+                                    m = min(face_real, ctx_real)
+                                    if not face_logit_ok or not ctx_logit_ok:
+                                        m = 0.0
+                                    antispoof_real = m
+                                    spoof_gate_ok = m >= real_thr
+                                    result.details["antispoof_dual_crop_strategy"] = "min"
+                            else:
+                                # Context region empty — fall back to face-only gating
+                                antispoof_real = face_real if face_logit_ok else 0.0
+                                spoof_gate_ok = bool(face_real >= real_thr and face_logit_ok)
+                                result.details["antispoof_dual_crop_strategy"] = f"{strategy}_no_context_crop"
+                        else:
+                            antispoof_real = face_real if face_logit_ok else 0.0
+                            spoof_gate_ok = bool(face_real >= real_thr and face_logit_ok)
+                            result.details["antispoof_dual_crop_strategy"] = f"{strategy}_no_context_bounds"
+                    else:
+                        # Face crop only
+                        antispoof_real = face_real if face_logit_ok else 0.0
+                        spoof_gate_ok = antispoof_real >= real_thr
+                        result.details["antispoof_dual_crop_strategy"] = "face_only"
 
             # Blend: antispoof_weight * antispoof_real + (1 - antispoof_weight) * heuristic
             w = self._settings.antispoof_weight if antispoof_used else 0.0
@@ -267,16 +334,38 @@ class LivenessService:
                 result.details["reason"] = "Image too blurry (possible photo/screen)"
             elif not size_ok:
                 result.details["reason"] = "Face too small (possible screenshot)"
-            elif antispoof_used and antispoof_real < self._settings.antispoof_real_threshold:
-                result.details["reason"] = "Anti-spoof: classified as spoof"
+            elif antispoof_used and not spoof_gate_ok:
+                if (
+                    strategy == "asymmetric"
+                    and use_ctx
+                    and ctx_real is not None
+                    and result.details.get("antispoof_dual_crop_strategy") == "asymmetric"
+                ):
+                    if not pass_face:
+                        result.details["reason"] = (
+                            "Anti-spoof: face logit margin too low"
+                            if not face_logit_ok
+                            else "Anti-spoof: face crop below threshold"
+                        )
+                    else:
+                        result.details["reason"] = (
+                            "Anti-spoof: context/scene suggests replay or screen (below context threshold)"
+                        )
+                else:
+                    result.details["reason"] = "Anti-spoof: classified as spoof"
             else:
                 result.details["reason"] = "OK"
 
+            live_conf_thr = (
+                liveness_confidence_threshold_override
+                if liveness_confidence_threshold_override is not None
+                else self._settings.liveness_confidence_threshold
+            )
             result.live = (
-                result.confidence >= self._settings.liveness_confidence_threshold
+                result.confidence >= live_conf_thr
                 and sharp_ok
                 and size_ok
-                and (not antispoof_used or antispoof_real >= self._settings.antispoof_real_threshold)
+                and (not antispoof_used or spoof_gate_ok)
             )
         except Exception as e:
             logger.exception("Liveness check failed")

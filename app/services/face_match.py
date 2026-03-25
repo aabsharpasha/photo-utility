@@ -12,6 +12,7 @@ import os
 import sys
 from typing import Any
 
+import cv2
 import numpy as np
 
 from app.config import get_settings
@@ -100,6 +101,39 @@ class FaceMatchService:
             logger.warning("Source embedding unavailable; check recognition model initialization")
             return _to_native(result)
 
+        # Aadhaar robustness: if source looks low-quality, reduce effective threshold slightly.
+        effective_threshold = float(similarity_threshold)
+        if effective_threshold > 0.0:
+            try:
+                gray = cv2.cvtColor(source_img, cv2.COLOR_BGR2GRAY)
+                lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                src_det_score = float(getattr(src_face, "det_score", 0.0))
+                src_area_ratio = 1.0
+                if getattr(src_face, "bbox", None) is not None:
+                    x1, y1, x2, y2 = map(float, src_face.bbox[:4])
+                    h, w = source_img.shape[:2]
+                    if h > 0 and w > 0:
+                        face_area = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+                        src_area_ratio = float(face_area / (w * h))
+
+                low_quality = (
+                    src_area_ratio < float(getattr(self._settings, "face_match_low_face_area_ratio_min", 0.015))
+                    or lap_var < float(getattr(self._settings, "face_match_low_sharpness_laplacian_min", 18.0))
+                    or src_det_score < float(getattr(self._settings, "face_match_low_det_score_min", 0.45))
+                )
+                if low_quality:
+                    delta = float(
+                        getattr(
+                            self._settings,
+                            "face_match_low_quality_similarity_threshold_delta",
+                            10.0,
+                        )
+                    )
+                    effective_threshold = max(0.0, effective_threshold - delta)
+            except Exception:
+                # Do not fail face-match for quality heuristic errors.
+                effective_threshold = float(similarity_threshold)
+
         # Build matches / unmatched for target faces
         for tf in tgt_faces:
             t_bbox = _bbox_to_relative(tf.bbox, target_img.shape if target_img is not None else None)
@@ -118,7 +152,7 @@ class FaceMatchService:
             similarity = _cosine_similarity(src_emb, t_emb) * 100.0  # nominally -100..100
             similarity = max(0.0, min(100.0, similarity))
 
-            if similarity >= similarity_threshold:
+            if similarity >= effective_threshold:
                 result["FaceMatches"].append(
                     {
                         "Similarity": float(similarity),
@@ -140,6 +174,14 @@ class FaceMatchService:
         result["FaceMatches"].sort(key=lambda m: m.get("Similarity", 0.0), reverse=True)
 
         return _to_native(result)
+
+    def pairwise_face_similarity_percent(self, img_a: np.ndarray, img_b: np.ndarray) -> float:
+        """Best 0–100 embedding similarity between the primary face in A and any face in B (CompareFaces scale)."""
+        out = self.compare(img_a, img_b, similarity_threshold=0.0)
+        matches = out.get("FaceMatches") or []
+        if matches:
+            return float(max(m.get("Similarity", 0.0) for m in matches))
+        return 0.0
 
 
 def _bbox_to_relative(bbox: Any, img_shape: tuple[int, int, int] | None) -> dict[str, float] | None:

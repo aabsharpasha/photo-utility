@@ -3,6 +3,9 @@
 # Or:    ./scripts/docker-up.sh
 # API:   http://localhost:8082/docs
 #
+# Tuning (thresholds, anti-spoof, motion, moiré, port, use_gpu): app/config.py Field defaults.
+# Optional .env next to this file for secrets only (e.g. API_KEY_QUERY_VALUE); loaded by Pydantic in the app.
+#
 # Railway: Railway does NOT use this file. It runs the Dockerfile and sets PORT;
 # the app listens on $PORT (see Dockerfile CMD). So 8082:8000 below does not affect Railway.
 
@@ -16,27 +19,9 @@ services:
     image: liveness-api:latest
     container_name: liveness-api
     ports:
-      - "8082:8000"   # local only: host 8082 -> container 8000
-    environment:
-      - PORT=8000     # so app listens on 8000 in container for this mapping
-      - ENVIRONMENT=production
-      - LOG_LEVEL=INFO
-      # Liveness: tuned for real webcam/mobile selfies (webcam-friendly blur; anti-spoof on face crop only)
-      - LAPLACIAN_MIN=25
-      - ANTISPOOF_ENABLED=true
-      - ANTISPOOF_MODEL_PATH=/app/models/antispoof.onnx
-      - ANTISPOOF_REAL_THRESHOLD=0.6
-      - ANTISPOOF_WEIGHT=0.5
-      - ANTISPOOF_REAL_INDEX=0
-      - ANTISPOOF_CROP_PADDING_RATIO=0.5
-      - ANTISPOOF_MIN_LOGIT_DIFF=0.0      # disable extra logit_diff gate; rely on real_threshold
-      - ANTISPOOF_DUAL_CROP=false         # use only face crop; more stable for real users
-      - ANTISPOOF_CONTEXT_PADDING_RATIO=2.0
-      # CPU only (no CUDA warning). Set USE_GPU=1 if you have GPU and onnxruntime-gpu.
-      - USE_GPU=0
-      # Optional: override host/port if needed
-      # - HOST=0.0.0.0
-      # - PORT=8000
+      - "8082:8000"   # container listens on 8000 (Dockerfile CMD ${PORT:-8000})
+    env_file:
+      - .env
     # No volumes: models are baked in at build time. Optional: add - ./models:/app/models:ro for antispoof.onnx
     # Memory: avoid OOM (exit 137) when loading models. With plain `docker compose up`, deploy is ignored:
     # give the container more RAM (e.g. Docker Desktop → Settings → Memory ≥ 4GB) or run:

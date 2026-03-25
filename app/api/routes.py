@@ -16,9 +16,75 @@ from app.deps import require_api_key_query
 from app.logging_config import get_logger, log_extra
 from app.services.liveness import LivenessService, decode_image, get_liveness_service, _to_native
 from app.services.face_match import FaceMatchService, get_face_match_service
+from app.services.replay_guard import motion_sequence_replay_metrics
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+
+def _motion_live_gate_summary(
+    *,
+    frames_live_ok: bool,
+    motion_ok: bool,
+    identity_ok: bool,
+    moire_ok: bool,
+    moire_gate_enabled: bool,
+) -> dict[str, list[str]]:
+    """Which motion liveness sub-checks passed vs failed (live requires all)."""
+    passed: list[str] = []
+    failed: list[str] = []
+    if frames_live_ok:
+        passed.append("per_frame_liveness")
+    else:
+        failed.append("per_frame_liveness")
+    if motion_ok:
+        passed.append("head_motion")
+    else:
+        failed.append("head_motion")
+    if identity_ok:
+        passed.append("face_identity_continuity")
+    else:
+        failed.append("face_identity_continuity")
+    if moire_gate_enabled:
+        if moire_ok:
+            passed.append("moire_gate")
+        else:
+            failed.append("moire_gate")
+    return {"passed": passed, "failed": failed}
+
+
+def _motion_live_mismatch_explanation(
+    *,
+    frames_live_ok: bool,
+    motion_ok: bool,
+    identity_ok: bool,
+    moire_ok: bool,
+    moire_gate_enabled: bool,
+    moire_max: float,
+    moire_threshold: float,
+) -> str | None:
+    """Human-readable why live is false even when some scores look strong."""
+    if frames_live_ok and motion_ok and identity_ok and (not moire_gate_enabled or moire_ok):
+        return None
+    sentences: list[str] = []
+    if not frames_live_ok:
+        sentences.append(
+            "Per-frame liveness failed: at least one frame is below the face / anti-spoof threshold."
+        )
+    if not motion_ok:
+        sentences.append(
+            "Head motion failed: consecutive face-center movement is below the configured minimum."
+        )
+    if not identity_ok:
+        sentences.append(
+            "Identity continuity failed: embedding similarity between some consecutive frames is too low."
+        )
+    if moire_gate_enabled and not moire_ok:
+        sentences.append(
+            f"Moiré gate failed (screen-like periodic pattern heuristic): moire_max={moire_max:.4f} "
+            f"must be strictly below {moire_threshold:.4f}. Per-frame liveness and motion/identity can still pass."
+        )
+    return " ".join(sentences) if sentences else None
 
 
 @router.get("/health", tags=["health"])
@@ -61,7 +127,11 @@ async def ready(request: Request) -> dict:
     response_model=LivenessResponse,
     tags=["liveness"],
     summary="Check face liveness",
-    description="Submit a single image (base64). Uses InsightFace for detection and sharpness/size heuristics for liveness.",
+    description=(
+        "Submit a single image (base64). InsightFace detection plus anti-spoof (face + context crop when "
+        "antispoof_dual_crop is enabled) and sharpness/size heuristics. Intended for real capture, not a "
+        "screengrab or printed photo."
+    ),
 )
 async def liveness(
     request: Request,
@@ -97,20 +167,26 @@ async def liveness(
     tags=["liveness"],
     summary="Motion-based liveness (multiple frames)",
     description=(
-        "Submit 2+ images captured in sequence. Each frame is checked for liveness, "
-        "and basic motion (head movement) is required between frames."
+        "Multi-frame liveness tuned to reject presentation attacks (screen/video replay, held prints): "
+        "each frame must pass face + context anti-spoof, optional moiré gate for display patterns, "
+        "consecutive pairs must show movement, and (by default) the same face identity across frames. "
+        "Tuning: app/config.py (motion_antispoof_*, motion_moire_*, motion_require_all_frames_live)."
     ),
 )
 async def liveness_motion(
     request: Request,
     body: MotionLivenessRequest,
     service: LivenessService = Depends(get_liveness_service),
+    face_match: FaceMatchService = Depends(get_face_match_service),
     _api_key: str = Depends(require_api_key_query),
 ) -> LivenessResponse:
-    """Motion-based liveness: require multiple frames and detectable motion."""
+    """Motion-based liveness: multiple frames, per-pair motion, optional same-identity check."""
     settings = get_settings()
-    if len(body.frames) < 2:
-        raise HTTPException(status_code=400, detail="At least 2 frames are required for motion liveness")
+    if len(body.frames) < settings.motion_min_frames:
+        raise HTTPException(
+            status_code=400,
+            detail=f"At least {settings.motion_min_frames} frames are required for motion liveness",
+        )
 
     # Decode all frames
     cv_frames = []
@@ -129,8 +205,18 @@ async def liveness_motion(
     frame_results = []
     centers = []
     norms = []
+    motion_real_thr = settings.motion_antispoof_real_threshold
+    motion_ctx_thr = settings.motion_antispoof_context_real_threshold
+    motion_logit_min = settings.motion_antispoof_min_logit_diff
     for img in cv_frames:
-        res = service.check(img)
+        res = service.check(
+            img,
+            force_context_antispoof=settings.motion_require_context_antispoof,
+            antispoof_real_threshold_override=motion_real_thr,
+            antispoof_context_real_threshold_override=motion_ctx_thr,
+            antispoof_min_logit_diff_override=motion_logit_min,
+            liveness_confidence_threshold_override=settings.motion_frame_liveness_confidence_threshold,
+        )
         frame_results.append(res)
         bbox = res.details.get("bbox")
         h, w = img.shape[:2]
@@ -141,32 +227,111 @@ async def liveness_motion(
             centers.append((cx, cy))
             norms.append(max(h, w))
 
-    # Basic motion: max normalized center shift across frames
     import math
 
+    motion_pair_shifts: list[float] = []
     motion_max_shift = 0.0
     if len(centers) >= 2:
         for i in range(len(centers) - 1):
             (cx1, cy1), (cx2, cy2) = centers[i], centers[i + 1]
             dx = cx2 - cx1
             dy = cy2 - cy1
-            # normalize by max image size (use corresponding norm)
             norm = max(norms[i], norms[i + 1]) or 1.0
             shift = math.hypot(dx, dy) / norm
+            motion_pair_shifts.append(float(round(shift, 4)))
             motion_max_shift = max(motion_max_shift, shift)
 
-    # Require some motion between frames (heuristic).
-    # 0.01 = 1% of image size (more forgiving; real users only need slight head movement).
-    motion_min_shift = 0.01
-    motion_ok = motion_max_shift >= motion_min_shift
+    min_shift = float(settings.motion_min_normalized_shift)
+    if not motion_pair_shifts:
+        motion_ok = False
+    elif settings.motion_require_shift_all_consecutive_pairs:
+        motion_ok = all(s >= min_shift for s in motion_pair_shifts)
+    else:
+        motion_ok = motion_max_shift >= min_shift
 
-    all_live = all(r.live for r in frame_results)
-    min_conf = min((r.confidence for r in frame_results), default=0.0)
+    identity_ok = True
+    consecutive_similarities: list[float] = []
+    if settings.motion_face_consistency_enabled and len(cv_frames) >= 2:
+        thr = float(settings.motion_min_consecutive_face_similarity)
+        for i in range(len(cv_frames) - 1):
+            sim = face_match.pairwise_face_similarity_percent(cv_frames[i], cv_frames[i + 1])
+            consecutive_similarities.append(float(round(sim, 2)))
+            if sim < thr:
+                identity_ok = False
+
+    frames_live_count = sum(1 for r in frame_results if r.live)
+    n_frames = len(frame_results)
+    min_live_needed = min(settings.motion_min_frames_with_live_face, n_frames) if n_frames else 0
+    if settings.motion_require_all_frames_live:
+        frames_live_ok = n_frames > 0 and frames_live_count == n_frames
+    else:
+        frames_live_ok = n_frames > 0 and frames_live_count >= min_live_needed
+
+    confs = [float(r.confidence) for r in frame_results]
+    min_conf = min(confs) if confs else 0.0
+    mean_conf = sum(confs) / len(confs) if confs else 0.0
+    # One motion-blurred frame should not zero top-level confidence if the sequence passes.
+    aggregate_confidence = min(1.0, 0.35 * min_conf + 0.65 * mean_conf)
+
+    replay_metrics = motion_sequence_replay_metrics(cv_frames)
+    moire_ok = True
+    if settings.motion_moire_gate_enabled:
+        moire_ok = replay_metrics["moire_max"] < settings.motion_moire_max_score
+
+    live_candidate = bool(frames_live_ok and motion_ok and moire_ok and identity_ok)
+    rejection_reasons: list[str] = []
+    if not frames_live_ok:
+        rejection_reasons.append("per_frame_liveness")
+    if not motion_ok:
+        rejection_reasons.append("insufficient_head_motion")
+    if not identity_ok:
+        rejection_reasons.append("face_identity_mismatch")
+    if settings.motion_moire_gate_enabled and not moire_ok:
+        rejection_reasons.append(
+            f"moire_gate(moire_max={replay_metrics['moire_max']:.4f}>="
+            f"{float(settings.motion_moire_max_score):.4f})"
+        )
+
+    gate_summary = _motion_live_gate_summary(
+        frames_live_ok=frames_live_ok,
+        motion_ok=motion_ok,
+        identity_ok=identity_ok,
+        moire_ok=moire_ok,
+        moire_gate_enabled=settings.motion_moire_gate_enabled,
+    )
+    mismatch_text = _motion_live_mismatch_explanation(
+        frames_live_ok=frames_live_ok,
+        motion_ok=motion_ok,
+        identity_ok=identity_ok,
+        moire_ok=moire_ok,
+        moire_gate_enabled=settings.motion_moire_gate_enabled,
+        moire_max=float(replay_metrics["moire_max"]),
+        moire_threshold=float(settings.motion_moire_max_score),
+    )
 
     details = {
         "frame_count": len(frame_results),
+        "motion_min_frames": settings.motion_min_frames,
         "motion_ok": motion_ok,
+        "motion_pair_shift_ratios": motion_pair_shifts,
         "motion_max_shift_ratio": float(round(motion_max_shift, 4)),
+        "motion_min_normalized_shift": min_shift,
+        "motion_require_all_pairs": settings.motion_require_shift_all_consecutive_pairs,
+        "identity_ok": identity_ok,
+        "motion_face_consistency_enabled": settings.motion_face_consistency_enabled,
+        "consecutive_face_similarities": consecutive_similarities,
+        "motion_min_consecutive_face_similarity": float(settings.motion_min_consecutive_face_similarity),
+        "motion_require_context_antispoof": settings.motion_require_context_antispoof,
+        "motion_frame_liveness_confidence_threshold": float(
+            settings.motion_frame_liveness_confidence_threshold
+        ),
+        "frames_live_count": frames_live_count,
+        "motion_require_all_frames_live": settings.motion_require_all_frames_live,
+        "motion_min_frames_with_live_face": min_live_needed,
+        "aggregate_confidence": float(round(aggregate_confidence, 4)),
+        "replay_metrics": replay_metrics,
+        "moire_gate_enabled": settings.motion_moire_gate_enabled,
+        "moire_gate_ok": moire_ok,
         "per_frame": [
             {
                 "live": r.live,
@@ -174,14 +339,26 @@ async def liveness_motion(
                 "details": {
                     "face_count": r.details.get("face_count"),
                     "bbox": r.details.get("bbox"),
+                    "reason": r.details.get("reason"),
+                    "antispoof_real_score": r.details.get("antispoof_real_score"),
+                    "antispoof_logit_diff": r.details.get("antispoof_logit_diff"),
+                    "antispoof_context_real_score": r.details.get("antispoof_context_real_score"),
+                    "antispoof_context_logit_diff": r.details.get("antispoof_context_logit_diff"),
+                    "antispoof_face_gate_ok": r.details.get("antispoof_face_gate_ok"),
+                    "antispoof_context_gate_ok": r.details.get("antispoof_context_gate_ok"),
+                    "antispoof_dual_crop_strategy": r.details.get("antispoof_dual_crop_strategy"),
                 },
             }
             for r in frame_results
         ],
+        "live_rejection_reasons": rejection_reasons,
+        "live_gate_summary": gate_summary,
+        "live_mismatch_explanation": mismatch_text,
     }
 
-    live = bool(all_live and motion_ok)
-    confidence = float(min_conf if live else 0.0)
+    live = live_candidate
+    # Report real blended score even when live is false (e.g. moiré gate only) so clients see the mismatch.
+    confidence = float(round(aggregate_confidence, 4))
 
     logger.info(
         "liveness motion check",
@@ -268,3 +445,5 @@ async def liveness_legacy(
 ) -> LivenessResponse:
     """Legacy path: same as POST /v1/liveness."""
     return await liveness(request, body, service)
+
+

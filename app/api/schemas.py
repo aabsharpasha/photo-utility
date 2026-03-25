@@ -27,7 +27,7 @@ class MotionLivenessRequest(BaseModel):
     frames: list[str] = Field(
         ...,
         min_length=2,
-        description="At least 2 base64-encoded images (JPEG/PNG) captured in sequence.",
+        description="Multiple base64-encoded images (JPEG/PNG) in sequence; minimum count is enforced server-side (default 3).",
     )
 
 
@@ -35,7 +35,15 @@ class LivenessResponse(BaseModel):
     """Liveness check result."""
 
     live: bool = Field(..., description="True if image is classified as live face")
-    confidence: float = Field(..., ge=0, le=1, description="Liveness confidence 0–1")
+    confidence: float = Field(
+        ...,
+        ge=0,
+        le=1,
+        description=(
+            "0–1. Single-image: score for that frame. Motion: blended per-frame confidence "
+            "(details.aggregate_confidence); may be high while live is false if an auxiliary gate failed."
+        ),
+    )
     details: dict = Field(default_factory=dict, description="Diagnostic details")
     errors: list[str] = Field(default_factory=list, description="Errors if any")
 

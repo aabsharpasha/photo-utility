@@ -48,8 +48,7 @@ COPY --from=builder /build/.venv /app/.venv
 COPY --from=builder /build/models /app/models
 COPY --from=builder /build/.insightface /app/.insightface
 COPY app/ ./app/
-# Optional: provide default env from example (docker-compose env vars override these)
-#COPY .env.example .env
+# App tuning defaults live in app/config.py; optional host .env is merged by Pydantic when present.
 
 # So InsightFace uses /app/.insightface (not /root/.insightface) and finds baked-in models
 ENV HOME=/app

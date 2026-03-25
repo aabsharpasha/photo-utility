@@ -39,7 +39,7 @@ def _get_antispoof_session():
         try:
             os.dup2(_devnull.fileno(), _stderr_fd)
             import onnxruntime as ort
-            if os.environ.get("USE_GPU", "").strip().lower() in ("1", "true", "yes"):
+            if get_settings().use_gpu:
                 available = set(ort.get_available_providers())
                 providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in available] or ["CPUExecutionProvider"]
             else:

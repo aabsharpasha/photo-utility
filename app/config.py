@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     # Server
     host: str = Field(default="0.0.0.0", description="Bind host")
     port: int = Field(default=8000, ge=1, le=65535, description="Bind port")
+    use_gpu: bool = Field(
+        default=False,
+        description="If True, try CUDA for ONNX Runtime (anti-spoof + InsightFace) when available.",
+    )
     workers: int = Field(default=1, ge=1, description="Uvicorn workers (1 recommended for model)")
     api_key_query_value: str = Field(
         default="my-secret-api-key",
@@ -72,6 +76,29 @@ class Settings(BaseSettings):
         le=100,
         description="Default face-match similarity threshold in percent (0-100) when request omits SimilarityThreshold.",
     )
+    face_match_low_quality_similarity_threshold_delta: float = Field(
+        default=10.0,
+        ge=0,
+        le=100,
+        description="Threshold reduction applied when source image quality is low (Aadhaar/photo scan case).",
+    )
+    face_match_low_face_area_ratio_min: float = Field(
+        default=0.015,
+        ge=0,
+        le=1,
+        description="Source face area ratio below this is treated as low quality for face-match.",
+    )
+    face_match_low_sharpness_laplacian_min: float = Field(
+        default=18.0,
+        ge=0,
+        description="Source Laplacian variance below this is treated as low quality for face-match.",
+    )
+    face_match_low_det_score_min: float = Field(
+        default=0.45,
+        ge=0,
+        le=1,
+        description="Source detection score below this is treated as low quality for face-match.",
+    )
     min_det_score: float = Field(
         default=0.5,
         ge=0,
@@ -90,10 +117,10 @@ class Settings(BaseSettings):
     )
     antispoof_input_size: int = Field(default=128, ge=64, description="Model input size (H=W)")
     antispoof_real_threshold: float = Field(
-        default=0.6,
+        default=0.54,
         ge=0,
         le=1,
-        description="Min score for 'real' class to pass (0.6=reject spoofs; lower to 0.35 if real selfies fail)",
+        description="Asymmetric: min face-crop 'real' for single-frame liveness (context uses antispoof_context_real_threshold).",
     )
     antispoof_weight: float = Field(
         default=0.5,
@@ -122,16 +149,119 @@ class Settings(BaseSettings):
         le=10,
         description="Min (real_logit - spoof_logit) to pass. 0 = balanced, 1+ = stricter (reject more spoofs).",
     )
-    # Run anti-spoof on a second, large context crop (face + scene); use min(face_score, context_score). Catches photo/screen held to camera.
+    # Second crop: large context (face + scene). How face + context combine: see antispoof_dual_crop_strategy.
     antispoof_dual_crop: bool = Field(
-        default=False,
-        description="If True, also run on a large-context crop and use the minimum real_score (stricter). Default False to match Docker config.",
+        default=True,
+        description="If True, also score a large scene crop next to the face crop.",
+    )
+    antispoof_dual_crop_strategy: Literal["min", "asymmetric"] = Field(
+        default="asymmetric",
+        description=(
+            "min: require min(face,context) >= threshold (harsh on real users). "
+            "asymmetric: face >= antispoof_real_threshold AND context >= antispoof_context_real_threshold."
+        ),
+    )
+    antispoof_context_real_threshold: float = Field(
+        default=0.38,
+        ge=0.0,
+        le=1.0,
+        description="Asymmetric mode: min context-crop 'real' score (below face bar; replay often fails here).",
     )
     antispoof_context_padding_ratio: float = Field(
         default=2.0,
         ge=0.5,
         le=5,
         description="Padding for context crop (2.0 = 2x face size each side). Only used if antispoof_dual_crop=True.",
+    )
+
+    # Motion-only liveness (/v1/liveness-motion): stronger checks for video / screen replay.
+    motion_require_context_antispoof: bool = Field(
+        default=True,
+        description="If True, run large-context anti-spoof each motion frame (uses antispoof_dual_crop_strategy).",
+    )
+    motion_antispoof_real_threshold: float = Field(
+        default=0.52,
+        ge=0.0,
+        le=1.0,
+        description="Asymmetric: min face-crop 'real' score per motion frame (context has its own threshold).",
+    )
+    motion_antispoof_context_real_threshold: float = Field(
+        default=0.36,
+        ge=0.0,
+        le=1.0,
+        description="Asymmetric motion only: min context-crop 'real' score (override via check()).",
+    )
+    motion_antispoof_min_logit_diff: float = Field(
+        default=0.05,
+        ge=-10.0,
+        le=10.0,
+        description=(
+            "With asymmetric strategy, applied to face crop only. With min strategy, applied to both crops. "
+            "0 disables logit gate."
+        ),
+    )
+    motion_frame_liveness_confidence_threshold: float = Field(
+        default=0.41,
+        ge=0.0,
+        le=1.0,
+        description="Min blended confidence per motion frame for that frame to count as live.",
+    )
+    motion_require_all_frames_live: bool = Field(
+        default=False,
+        description=(
+            "If True, every motion frame must pass per-frame liveness (strictest). "
+            "If False, require motion_min_frames_with_live_face (default 2/3) to reduce real-user false rejects."
+        ),
+    )
+    motion_min_frames_with_live_face: int = Field(
+        default=2,
+        ge=1,
+        le=12,
+        description="When motion_require_all_frames_live is False, min frames that pass per-frame liveness.",
+    )
+    motion_moire_gate_enabled: bool = Field(
+        default=True,
+        description=(
+            "If True, fail motion when moiré score exceeds motion_moire_max_score (helps vs filming a screen). "
+            "Disable or raise max if real scenes false-fail."
+        ),
+    )
+    motion_moire_max_score: float = Field(
+        default=0.76,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Fail when max per-frame moiré >= this. Balance: real webcams vs filming a screen. Raise if false rejects."
+        ),
+    )
+    motion_min_frames: int = Field(
+        default=3,
+        ge=2,
+        le=12,
+        description="Minimum frames for motion liveness (3+ mimics multi-frame video-style checks).",
+    )
+    motion_min_normalized_shift: float = Field(
+        default=0.01,
+        ge=0.005,
+        le=0.2,
+        description="Min normalized face-center movement between frames (see motion_require_shift_all_consecutive_pairs).",
+    )
+    motion_require_shift_all_consecutive_pairs: bool = Field(
+        default=False,
+        description=(
+            "If True, every consecutive pair must exceed the shift minimum. If False, only the "
+            "largest pairwise shift must exceed it (more forgiving when one interval is nearly still)."
+        ),
+    )
+    motion_face_consistency_enabled: bool = Field(
+        default=True,
+        description="If True, require embedding similarity across each consecutive pair (same identity as AWS-style continuity).",
+    )
+    motion_min_consecutive_face_similarity: float = Field(
+        default=38.0,
+        ge=0.0,
+        le=100.0,
+        description="Min face similarity (0–100, CompareFaces-style) between consecutive frames.",
     )
 
     # Limits
