@@ -71,7 +71,7 @@ class Settings(BaseSettings):
         description="Min confidence to report live=True",
     )
     face_match_default_similarity_threshold: float = Field(
-        default=65.0,
+        default=45.0,
         ge=0,
         le=100,
         description="Default face-match similarity threshold in percent (0-100) when request omits SimilarityThreshold.",

@@ -83,7 +83,12 @@ class CompareFacesRequest(BaseModel):
 
     SourceImage: RekognitionImage = Field(..., description="Source image containing the face to search for.")
     TargetImage: RekognitionImage = Field(..., description="Target image that may contain matching faces.")
-    SimilarityThreshold: Optional[float] = None
+    SimilarityThreshold: Optional[float] = Field(
+        default=45.0,
+        ge=0,
+        le=100,
+        description="Face match threshold in percent (0-100). Defaults to 45 in case of aadhar photo match.",
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -94,7 +99,7 @@ class CompareFacesRequest(BaseModel):
                 "TargetImage": {
                     "Bytes": "data:image/jpeg;base64,/9j/4AAQSkZJRg...",
                 },
-                "SimilarityThreshold": 90.0,
+                "SimilarityThreshold": 45,
             }
         }
     }
