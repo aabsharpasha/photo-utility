@@ -28,7 +28,6 @@ def _motion_live_gate_summary(
     motion_ok: bool,
     identity_ok: bool,
     single_face_ok: bool,
-    challenge_ok: bool,
     moire_ok: bool,
     moire_gate_enabled: bool,
 ) -> dict[str, list[str]]:
@@ -51,10 +50,6 @@ def _motion_live_gate_summary(
         passed.append("single_face_per_frame")
     else:
         failed.append("single_face_per_frame")
-    if challenge_ok:
-        passed.append("challenge_response")
-    else:
-        failed.append("challenge_response")
     if moire_gate_enabled:
         if moire_ok:
             passed.append("moire_gate")
@@ -69,7 +64,6 @@ def _motion_live_mismatch_explanation(
     motion_ok: bool,
     identity_ok: bool,
     single_face_ok: bool,
-    challenge_ok: bool,
     moire_ok: bool,
     moire_gate_enabled: bool,
     moire_max: float,
@@ -88,7 +82,6 @@ def _motion_live_mismatch_explanation(
         and motion_ok
         and identity_ok
         and single_face_ok
-        and challenge_ok
         and (not moire_gate_enabled or moire_ok)
     ):
         return None
@@ -126,10 +119,6 @@ def _motion_live_mismatch_explanation(
     if not single_face_ok:
         sentences.append(
             "Single-face gate failed: each frame must contain exactly one face."
-        )
-    if not challenge_ok:
-        sentences.append(
-            "Challenge-response failed: observed head-direction sequence does not match the requested pattern."
         )
     if moire_gate_enabled and not moire_ok:
         sentences.append(
@@ -221,8 +210,8 @@ async def liveness(
     description=(
         "Multi-frame liveness tuned to reject presentation attacks (screen/video replay, held prints): "
         "each frame must pass face + context anti-spoof, optional moiré gate for display patterns, "
-        "consecutive pairs must show movement, and (by default) the same face identity across frames. "
-        "Tuning: app/config.py (motion_antispoof_*, motion_moire_*, motion_require_all_frames_live)."
+        "consecutive frames must show head movement (any direction), and (by default) the same face identity "
+        "across frames. Tuning: app/config.py (motion_antispoof_*, motion_moire_*, motion_min_normalized_shift)."
     ),
 )
 async def liveness_motion(
@@ -304,30 +293,9 @@ async def liveness_motion(
     else:
         motion_ok = motion_max_shift >= min_shift
 
-    # Enforce server-side default challenge for all clients.
-    # This keeps behavior consistent even if callers pass another challenge value.
-    challenge = "side-to-side"
-    challenge_ok = True
-    challenge_details: dict[str, object] = {"challenge": challenge}
-    if challenge != "none":
-        if len(centers) < 3:
-            challenge_ok = False
-            challenge_details["reason"] = "not_enough_detected_faces_for_challenge"
-        else:
-            dx1 = centers[1][0] - centers[0][0]
-            dx2 = centers[2][0] - centers[1][0]
-            min_turn_shift = min_shift * 0.6
-            if challenge == "left-right":
-                challenge_ok = (dx1 <= -min_turn_shift) and (dx2 >= min_turn_shift)
-            elif challenge == "right-left":
-                challenge_ok = (dx1 >= min_turn_shift) and (dx2 <= -min_turn_shift)
-            challenge_details.update(
-                {
-                    "dx1": float(round(dx1, 4)),
-                    "dx2": float(round(dx2, 4)),
-                    "min_turn_shift": float(round(min_turn_shift, 4)),
-                }
-            )
+    # Liveness requires random head movement only (no directional challenge): the head_motion
+    # gate above (motion_ok) enforces that consecutive frames show sufficient face-center movement
+    # in any direction. Screen/video replay is still resisted by the anti-spoof and moiré gates.
 
     identity_ok = True
     consecutive_similarities: list[float] = []
@@ -383,7 +351,7 @@ async def liveness_motion(
         moire_ok = replay_metrics["moire_max"] < settings.motion_moire_max_score
 
     live_candidate = bool(
-        frames_live_ok and motion_ok and moire_ok and identity_ok and single_face_ok and challenge_ok
+        frames_live_ok and motion_ok and moire_ok and identity_ok and single_face_ok
     )
     rejection_reasons: list[str] = []
     if not frames_live_ok:
@@ -394,8 +362,6 @@ async def liveness_motion(
         rejection_reasons.append("face_identity_mismatch")
     if not single_face_ok:
         rejection_reasons.append("multiple_or_missing_faces")
-    if not challenge_ok:
-        rejection_reasons.append(f"challenge_response_failed({challenge})")
     if settings.motion_moire_gate_enabled and not moire_ok:
         rejection_reasons.append(
             f"moire_gate(moire_max={replay_metrics['moire_max']:.4f}>="
@@ -407,7 +373,6 @@ async def liveness_motion(
         motion_ok=motion_ok,
         identity_ok=identity_ok,
         single_face_ok=single_face_ok,
-        challenge_ok=challenge_ok,
         moire_ok=moire_ok,
         moire_gate_enabled=settings.motion_moire_gate_enabled,
     )
@@ -416,7 +381,6 @@ async def liveness_motion(
         motion_ok=motion_ok,
         identity_ok=identity_ok,
         single_face_ok=single_face_ok,
-        challenge_ok=challenge_ok,
         moire_ok=moire_ok,
         moire_gate_enabled=settings.motion_moire_gate_enabled,
         moire_max=float(replay_metrics["moire_max"]),
@@ -438,9 +402,6 @@ async def liveness_motion(
         "motion_max_shift_ratio": float(round(motion_max_shift, 4)),
         "motion_min_normalized_shift": min_shift,
         "motion_require_all_pairs": settings.motion_require_shift_all_consecutive_pairs,
-        "challenge": challenge,
-        "challenge_ok": challenge_ok,
-        "challenge_details": challenge_details,
         "identity_ok": identity_ok,
         "single_face_ok": single_face_ok,
         "per_frame_face_counts": per_frame_face_counts,

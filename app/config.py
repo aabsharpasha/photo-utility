@@ -198,10 +198,10 @@ class Settings(BaseSettings):
         description="Asymmetric: min face-crop 'real' score per motion frame (context has its own threshold).",
     )
     motion_antispoof_context_real_threshold: float = Field(
-        default=0.015,
+        default=0.15,
         ge=0.0,
         le=1.0,
-        description="Asymmetric motion only: min context-crop 'real' score (override via check()).",
+        description="Asymmetric motion only: min context-crop 'real' score (override via check()). Screens/bezels/held phones usually fail here.",
     )
     motion_antispoof_min_logit_diff: float = Field(
         default=0.0,
@@ -240,10 +240,13 @@ class Settings(BaseSettings):
         ),
     )
     motion_min_frames_with_live_face: int = Field(
-        default=3,
+        default=2,
         ge=1,
         le=12,
-        description="When motion_require_all_frames_live is False, min frames that pass per-frame liveness.",
+        description=(
+            "When motion_require_all_frames_live is False, min frames that pass per-frame liveness. "
+            "Kept below motion_min_frames so profile frames during the head turn don't force a false reject."
+        ),
     )
     motion_moire_gate_enabled: bool = Field(
         default=True,
@@ -253,7 +256,7 @@ class Settings(BaseSettings):
         ),
     )
     motion_moire_max_score: float = Field(
-        default=0.72,
+        default=0.62,
         ge=0.0,
         le=1.0,
         description=(
