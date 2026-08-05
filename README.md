@@ -1,12 +1,23 @@
 # Liveness API – Request / Response
 
-Simple HTTP API for face liveness:
+Simple HTTP API for face liveness and face match:
 
 - **Single-frame liveness**: `POST /api/v1/liveness`
 - **Motion-based liveness**: `POST /api/v1/liveness-motion`
-- **Health**: `GET /api/health`
+- **Face match (Rekognition-style)**: `POST /api/v1/face-match`
+- **Health**: `GET /api/health` · **Readiness (loads models)**: `GET /api/ready`
 
 All examples below assume the API is reachable at `http://localhost:8082` (adjust host/port as needed).
+
+## Authentication
+
+All liveness and face-match endpoints require an API key as a **query parameter**:
+
+```http
+POST /api/v1/liveness-motion?api_key=<API_KEY_QUERY_VALUE>
+```
+
+Missing/invalid key → `401 {"detail": "Invalid or missing API key"}`. Health/ready endpoints are open.
 
 ---
 
@@ -28,6 +39,8 @@ GET /api/health
 }
 ```
 
+`GET /api/ready` additionally triggers model load and returns `503 {"status": "degraded"}` until models are available.
+
 ---
 
 ## Single-frame liveness
@@ -35,7 +48,7 @@ GET /api/health
 **Endpoint**
 
 ```http
-POST /api/v1/liveness
+POST /api/v1/liveness?api_key=...
 Content-Type: application/json
 ```
 
@@ -82,10 +95,13 @@ Content-Type: application/json
 
 ## Motion-based liveness (multiple frames)
 
+Multi-frame liveness tuned to reject presentation attacks (screen/video replay, held prints). The user
+moves their head naturally between captures — **any direction**; there is no prescribed pattern.
+
 **Endpoint**
 
 ```http
-POST /api/v1/liveness-motion
+POST /api/v1/liveness-motion?api_key=...
 Content-Type: application/json
 ```
 
@@ -94,14 +110,26 @@ Content-Type: application/json
 ```json
 {
   "frames": [
-    "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ...",   // frame 1
-    "/9j/4AAQSkZJRgABAQ...",                          // frame 2 (raw base64)
-    "...optional more frames..."
+    "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ...",
+    "/9j/4AAQSkZJRgABAQ...",
+    "/9j/4AAQSkZJRgABAQ..."
   ]
 }
 ```
 
-Minimum 2 frames are required. Frames should be captured in sequence with slight head movement between them.
+Minimum **3 frames** by default (`motion_min_frames`). Recommended capture strategy per frame:
+prompt a head movement, let the user settle and hold, then capture a **sharp** (non-blurred) frame.
+Sending motion-blurred transitional frames is the most common cause of false rejects.
+
+**`live` is `true` only when ALL of these gates pass:**
+
+| Gate | Meaning |
+| --- | --- |
+| `per_frame_liveness` | Enough frames pass face detection + sharpness/size + anti-spoof (strict quorum, or relaxed quorum when enabled) |
+| `head_motion` | Face center moves enough between frames (`motion_min_normalized_shift`, any direction) |
+| `face_identity_continuity` | Consecutive frames contain the **same face** (embedding similarity) |
+| `single_face_per_frame` | Exactly one face in every frame |
+| `moire_gate` (optional) | No screen-like periodic pattern (FFT moiré heuristic) |
 
 **Response body** (example):
 
@@ -110,24 +138,42 @@ Minimum 2 frames are required. Frames should be captured in sequence with slight
   "live": true,
   "confidence": 0.91,
   "details": {
-    "frame_count": 2,
+    "frame_count": 3,
     "motion_ok": true,
-    "motion_max_shift_ratio": 0.015,
+    "motion_pair_shift_ratios": [0.031, 0.052],
+    "motion_max_shift_ratio": 0.052,
+    "motion_min_normalized_shift": 0.02,
+    "identity_ok": true,
+    "single_face_ok": true,
+    "per_frame_face_counts": [1, 1, 1],
+    "consecutive_face_similarities": [99.1, 98.7],
+    "frames_live_count": 3,
+    "aggregate_confidence": 0.91,
+    "replay_metrics": { "moire_scores": [0.0, 0.0, 0.0], "moire_max": 0.0 },
+    "moire_gate_enabled": true,
+    "moire_gate_ok": true,
+    "live_rejection_reasons": [],
+    "live_gate_summary": {
+      "passed": [
+        "per_frame_liveness",
+        "head_motion",
+        "face_identity_continuity",
+        "single_face_per_frame",
+        "moire_gate"
+      ],
+      "failed": []
+    },
+    "live_mismatch_explanation": null,
     "per_frame": [
       {
         "live": true,
         "confidence": 0.93,
         "details": {
           "face_count": 1,
-          "bbox": [90, 210, 290, 340]
-        }
-      },
-      {
-        "live": true,
-        "confidence": 0.91,
-        "details": {
-          "face_count": 1,
-          "bbox": [95, 215, 295, 345]
+          "bbox": [90, 210, 290, 340],
+          "reason": "OK",
+          "antispoof_real_score": 0.97,
+          "antispoof_context_real_score": 0.41
         }
       }
     ]
@@ -136,14 +182,62 @@ Minimum 2 frames are required. Frames should be captured in sequence with slight
 }
 ```
 
-- `live`: `true` only if **all frames are live** and **enough motion** is detected between frames.
-- `motion_max_shift_ratio`: approximate maximum head movement between frames as a fraction of image size.
+- `confidence`: blended per-frame confidence (`details.aggregate_confidence`); can be high while
+  `live` is `false` if an auxiliary gate failed — check `live_gate_summary` / `live_rejection_reasons`.
+- `live_mismatch_explanation`: human-readable reason whenever `live` is `false`.
+- Tuning knobs live in `app/config.py` (`motion_*` fields): anti-spoof thresholds, moiré gate,
+  per-frame quorum, minimum shift, identity similarity.
+
+---
+
+## Face match (Rekognition-style)
+
+Compare a source face against faces in a target image. Request/response follow AWS Rekognition
+`CompareFaces` (subset).
+
+**Endpoint**
+
+```http
+POST /api/v1/face-match?api_key=...
+Content-Type: application/json
+```
+
+**Request body**
+
+```json
+{
+  "SourceImage": { "Bytes": "data:image/jpeg;base64,/9j/..." },
+  "TargetImage": { "Bytes": "/9j/..." },
+  "SimilarityThreshold": 45
+}
+```
+
+**Response body** (example):
+
+```json
+{
+  "Match": true,
+  "SourceImageFace": { "BoundingBox": {}, "Confidence": 99.2 },
+  "FaceMatches": [
+    { "Similarity": 97.4, "Face": { "BoundingBox": {}, "Confidence": 98.8 } }
+  ],
+  "UnmatchedFaces": []
+}
+```
 
 ---
 
 ## Error responses
 
 Common error shapes:
+
+- Missing/invalid API key:
+
+```json
+{
+  "detail": "Invalid or missing API key"
+}
+```
 
 - Invalid/too large image:
 
@@ -158,6 +252,14 @@ Common error shapes:
 ```json
 {
   "detail": "Image payload exceeds max size (10485760 bytes)"
+}
+```
+
+- Not enough frames (motion):
+
+```json
+{
+  "detail": "At least 3 frames are required for motion liveness"
 }
 ```
 
