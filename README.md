@@ -1,13 +1,16 @@
 # Liveness API – Request / Response
 
-Simple HTTP API for face liveness and face match:
+FastAPI service for face liveness and face match:
 
+- **Session-based liveness (challenge–response, recommended)**:
+  `POST /api/v1/liveness-sessions` · `WS /api/v1/liveness-sessions/{id}/stream` · `GET /api/v1/liveness-sessions/{id}/result`
 - **Single-frame liveness**: `POST /api/v1/liveness`
 - **Motion-based liveness**: `POST /api/v1/liveness-motion`
 - **Face match (Rekognition-style)**: `POST /api/v1/face-match`
 - **Health**: `GET /api/health` · **Readiness (loads models)**: `GET /api/ready`
 
-All examples below assume the API is reachable at `http://localhost:8082` (adjust host/port as needed).
+**Run**: `docker compose build && docker compose up -d` → API at `http://localhost:8082`,
+interactive docs at `/docs`. All examples below assume that base URL (adjust host/port as needed).
 
 ## Authentication
 
