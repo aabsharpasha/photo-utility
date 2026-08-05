@@ -198,7 +198,7 @@ class Settings(BaseSettings):
         description="Asymmetric: min face-crop 'real' score per motion frame (context has its own threshold).",
     )
     motion_antispoof_context_real_threshold: float = Field(
-        default=0.15,
+        default=0.015,
         ge=0.0,
         le=1.0,
         description="Asymmetric motion only: min context-crop 'real' score (override via check()). Screens/bezels/held phones usually fail here.",
@@ -291,6 +291,107 @@ class Settings(BaseSettings):
         ge=0.0,
         le=100.0,
         description="Min face similarity (0–100, CompareFaces-style) between consecutive frames.",
+    )
+
+    # Session-based liveness (challenge–response streaming, /v1/liveness-sessions)
+    liveness_session_ttl_seconds: int = Field(
+        default=20,
+        ge=5,
+        le=300,
+        description="Session/challenge TTL: the stream must produce a verdict within this window.",
+    )
+    liveness_session_verdict_ttl_seconds: int = Field(
+        default=86400,
+        ge=60,
+        description="How long a finished session verdict stays retrievable via GET .../result.",
+    )
+    liveness_session_max_frame_bytes: int = Field(
+        default=500_000,
+        description="Max size of a single streamed JPEG frame (bytes).",
+    )
+    liveness_session_passive_every_n: int = Field(
+        default=3,
+        ge=1,
+        description="Run passive anti-spoof (and moiré) on every Nth streamed frame.",
+    )
+    liveness_session_passive_min_frames: int = Field(
+        default=8,
+        ge=1,
+        description="Min analyzed frames before the passive anti-spoof gate can pass.",
+    )
+    liveness_session_passive_mean_threshold: float = Field(
+        default=0.80,
+        ge=0.0,
+        le=1.0,
+        description="Passive gate: rolling mean anti-spoof real-score must be >= this.",
+    )
+    liveness_session_ear_closed_threshold: float = Field(
+        default=0.20,
+        gt=0.0,
+        lt=1.0,
+        description="Eye aspect ratio below which the eyes count as closed (blink detection).",
+    )
+    liveness_session_max_blinks_per_second: float = Field(
+        default=8.0,
+        gt=0.0,
+        description="Blink transitions above this rate are treated as noise and not counted.",
+    )
+    liveness_session_yaw_turn_degrees: float = Field(
+        default=20.0,
+        gt=0.0,
+        description="Head-turn challenge: |yaw| must exceed this in the required direction.",
+    )
+    liveness_session_yaw_frontal_degrees: float = Field(
+        default=10.0,
+        gt=0.0,
+        description="Head-turn challenge: |yaw| below this counts as returned-to-frontal (mandatory).",
+    )
+    liveness_session_turn_min_consecutive_frames: int = Field(
+        default=3,
+        ge=1,
+        description="Head-turn challenge: consecutive frames the turn must be held.",
+    )
+    liveness_session_min_face_iou: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Consecutive face-box IoU must stay above this (defeats mid-session photo swap).",
+    )
+    liveness_session_max_identical_consecutive_frames: int = Field(
+        default=3,
+        ge=1,
+        description="More than this many pixel-identical consecutive frames -> frame_tampering_suspected.",
+    )
+    liveness_session_moire_max_score: float = Field(
+        default=0.62,
+        ge=0.0,
+        le=1.0,
+        description="Per-frame FFT moiré score threshold on the face crop (session streaming).",
+    )
+    liveness_session_moire_max_frame_fraction: float = Field(
+        default=0.30,
+        ge=0.0,
+        le=1.0,
+        description="If more than this fraction of analyzed frames exceed the moiré threshold -> spoof_suspected.",
+    )
+    liveness_session_max_no_face_frames: int = Field(
+        default=25,
+        ge=1,
+        description="Consecutive frames without a detected face before the session fails with face_lost.",
+    )
+    liveness_session_inference_workers: int = Field(
+        default=0,
+        ge=0,
+        description="ThreadPoolExecutor size for session inference; 0 = CPU core count.",
+    )
+    liveness_session_max_inflight_frames: int = Field(
+        default=5,
+        ge=1,
+        description="Backpressure: frames are dropped while this many are queued for one session.",
+    )
+    redis_url: str = Field(
+        default="",
+        description="Optional Redis URL for the session/verdict store; empty = in-memory store.",
     )
 
     # Limits

@@ -145,6 +145,8 @@ async def ready(request: Request) -> dict:
     try:
         from app.services.liveness import _get_face_app
         _get_face_app()
+        from app.liveness_session.vision import warmup as _session_warmup
+        _session_warmup()
     except Exception as e:
         logger.warning("Readiness check failed: %s", e)
         return JSONResponse(

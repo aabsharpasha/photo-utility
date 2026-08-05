@@ -227,6 +227,57 @@ Content-Type: application/json
 
 ---
 
+## Session-based liveness (challenge–response streaming)
+
+Single-use sessions with a server-chosen random challenge, verified over a frame-streaming
+WebSocket. Endpoints are named `liveness-sessions` to avoid clashing with the existing
+`/api/v1/liveness*` routes.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/v1/liveness-sessions?api_key=...` | Create session, returns challenge + short-lived stream token |
+| `WS /api/v1/liveness-sessions/{id}/stream?token=...` | Client streams JPEG frames; server runs checks and pushes progress |
+| `GET /api/v1/liveness-sessions/{id}/result?api_key=...` | Idempotent backend-to-backend verdict fetch (never trust the client to relay it) |
+
+**Create session** → `200`:
+
+```json
+{
+  "session_id": "6f1c...",
+  "stream_token": "kJ3v...",
+  "challenge": "blink",
+  "required_blinks": 2,
+  "expires_in_seconds": 20,
+  "stream_path": "/api/v1/liveness-sessions/6f1c.../stream"
+}
+```
+
+Challenges: `blink` (random 2–3 blinks), `turn_left`, `turn_right` (hold the turn, then
+**return to frontal** — mandatory, defeats side-profile photos).
+
+**WebSocket protocol**: client sends binary messages, each a 4-byte big-endian sequence
+number followed by JPEG bytes (5–10 fps, max 500 KB/frame). Out-of-order or duplicate
+sequence numbers terminate the session (replay defense). Server pushes JSON `progress`
+messages (`hint`, blink/turn state, passive status) and a final `result` message.
+
+**Verdict**: `live = passive anti-spoof pass AND challenge done AND no anti-gaming failure
+AND not expired`. Failure reasons: `expired | challenge_failed | spoof_suspected |
+multiple_faces | face_lost | frame_tampering_suspected`. Verdicts are stored 24 h
+(in-memory by default; set `REDIS_URL` for Redis).
+
+**Config**: every threshold is an env var with defaults in `app/config.py`
+(`LIVENESS_SESSION_*`, see `.env.example`).
+
+**Demo client**: `python examples/webcam_client.py --base http://localhost:8082 --api-key ...`
+(requires `pip install opencv-python websockets requests`).
+
+**Known limitation**: server-side checks cannot fully defeat virtual-camera injection
+(OBS/deepfake feeds). Implemented mitigations: sequence-number replay rejection, duplicate
+frame hashing, face-box continuity (IoU), moiré screen detection, passive MiniFAS anti-spoof.
+Roadmap: signed client capture attestation and a screen-flash color-reflection challenge.
+
+---
+
 ## Error responses
 
 Common error shapes:

@@ -81,3 +81,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 app.include_router(router, prefix="/api")
+
+from app.liveness_session.router import router as liveness_session_router  # noqa: E402
+
+app.include_router(liveness_session_router, prefix="/api")

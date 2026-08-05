@@ -9,3 +9,7 @@ dist/
 .pytest_cache/
 .coverage
 htmlcov/
+.claude/
+CLAUDE.md
+docs/
+examples/
