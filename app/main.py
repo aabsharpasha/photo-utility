@@ -36,6 +36,21 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
+@app.on_event("startup")
+async def preload_models() -> None:
+    """Load all models before serving traffic: a cold lazy-load takes ~10-15s, which
+    would eat most of a 20s liveness session's TTL on the first request after a restart."""
+    try:
+        from app.services.liveness import _get_face_app
+        from app.liveness_session.vision import warmup
+
+        _get_face_app()
+        warmup()
+        logger.info("Models preloaded at startup")
+    except Exception:
+        logger.exception("Model preload failed; will retry lazily on first request")
+
+
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
