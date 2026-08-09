@@ -80,6 +80,13 @@ class BlinkDetector:
         self._blink_times: deque[float] = deque(maxlen=64)
         self.blinks = 0
         self.noise_detected = False
+        # Debug/diagnostics (populated as frames arrive)
+        self.last_ear: float | None = None
+        self.last_threshold: float | None = None
+        self.ear_min: float | None = None
+        self.ear_max: float | None = None
+        self.closed_frames = 0
+        self.frames_seen = 0
 
     def _closed_threshold(self) -> float:
         if len(self._ears) < self._BASELINE_MIN_SAMPLES:
@@ -89,8 +96,16 @@ class BlinkDetector:
 
     def update(self, ear: float, timestamp: float) -> None:
         ready = len(self._ears) >= self._BASELINE_MIN_SAMPLES
-        closed = ear < self._closed_threshold()
+        threshold = self._closed_threshold()
+        closed = ear < threshold
         self._ears.append(ear)
+        self.frames_seen += 1
+        self.last_ear = ear
+        self.last_threshold = threshold
+        self.ear_min = ear if self.ear_min is None else min(self.ear_min, ear)
+        self.ear_max = ear if self.ear_max is None else max(self.ear_max, ear)
+        if closed:
+            self.closed_frames += 1
         if ready and not self._baseline_was_ready:
             # Absolute -> relative threshold switchover: resync state so users whose
             # resting EAR sits below the absolute fallback don't get a phantom blink.
@@ -109,6 +124,23 @@ class BlinkDetector:
     @property
     def done(self) -> bool:
         return self.blinks >= self.required_blinks
+
+    def debug_state(self) -> dict:
+        """Compact diagnostics for progress payloads and logs."""
+
+        def r(v: float | None) -> float | None:
+            return round(v, 4) if v is not None else None
+
+        return {
+            "ear": r(self.last_ear),
+            "ear_threshold": r(self.last_threshold),
+            "ear_min": r(self.ear_min),
+            "ear_max": r(self.ear_max),
+            "eyes_closed_now": self._was_closed,
+            "closed_frames": self.closed_frames,
+            "frames_seen": self.frames_seen,
+            "noise_detected": self.noise_detected,
+        }
 
 
 class HeadTurnDetector:

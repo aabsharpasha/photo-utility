@@ -203,6 +203,7 @@ class _StreamState:
             "challenge": self.session.challenge,
             "challenge_done": self.challenge_done,
             "blinks_detected": self.blink.blinks if self.blink else None,
+            "blink_debug": self.blink.debug_state() if self.blink else None,
             "turn_state": self.turn.state if self.turn else None,
             "frames_received": self.frames_received,
             "passive_frames_analyzed": self.passive.frames_analyzed,
@@ -245,8 +246,24 @@ def _apply_analysis(state: _StreamState, analysis, timestamp: float) -> Optional
             state.hint = "screen-like pattern detected"
             return "spoof_suspected"
 
-    if state.blink is not None and analysis.ear is not None:
-        state.blink.update(analysis.ear, timestamp)
+    if state.blink is not None:
+        if analysis.ear is not None:
+            state.blink.update(analysis.ear, timestamp)
+            d = state.blink.debug_state()
+            logger.debug(
+                "blink frame session=%s ear=%s thr=%s closed=%s blinks=%d noise=%s",
+                state.session.id[:8],
+                d["ear"],
+                d["ear_threshold"],
+                d["eyes_closed_now"],
+                state.blink.blinks,
+                d["noise_detected"],
+            )
+        else:
+            # Face found but no usable landmarks: blink cannot progress on this frame.
+            logger.debug(
+                "blink frame session=%s ear=None (no landmarks)", state.session.id[:8]
+            )
     if state.turn is not None and analysis.yaw_degrees is not None:
         state.turn.update(analysis.yaw_degrees)
     return None
@@ -351,14 +368,26 @@ async def stream_session(
     session.verdict_at = time.time()
     store.put(session, settings.liveness_session_verdict_ttl_seconds)
     logger.info(
-        "liveness session verdict",
-        extra=log_extra(
-            session_id=session.id,
-            live=live,
-            reasons=",".join(reasons),
-            frames=state.frames_received,
-        ),
+        "liveness session verdict live=%s reasons=[%s] frames=%d analyzed=%d "
+        "passive_analyzed=%d passive_mean=%.4f challenge_done=%s age=%.1fs session=%s",
+        live,
+        ",".join(reasons),
+        state.frames_received,
+        state.frames_analyzed,
+        state.passive.frames_analyzed,
+        state.passive.mean_score,
+        state.challenge_done,
+        time.time() - session.created_at,
+        session.id,
     )
+    if state.blink is not None:
+        logger.info(
+            "blink summary session=%s blinks=%d/%d %s",
+            session.id,
+            state.blink.blinks,
+            state.blink.required_blinks,
+            state.blink.debug_state(),
+        )
     try:
         await ws.send_json(
             {
