@@ -331,6 +331,15 @@ class Settings(BaseSettings):
         lt=1.0,
         description="Eye aspect ratio below which the eyes count as closed (blink detection).",
     )
+    liveness_session_ear_relative_drop: float = Field(
+        default=0.25,
+        gt=0.0,
+        lt=1.0,
+        description=(
+            "Blink detection: eyes count as closed when EAR drops this fraction below the session's "
+            "rolling median (self-calibrates per person/device; absolute threshold is the cold-start fallback)."
+        ),
+    )
     liveness_session_max_blinks_per_second: float = Field(
         default=8.0,
         gt=0.0,

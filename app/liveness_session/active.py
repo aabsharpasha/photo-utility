@@ -54,7 +54,13 @@ class BlinkDetector:
     """
     Counts blinks as closed->open EAR transitions; transitions above
     max_blinks_per_second are treated as sensor/replay noise and not counted.
+
+    Closure is judged RELATIVE to the person's rolling baseline EAR once enough
+    samples exist (catches partial-closure frames at low fps and adapts to narrow
+    eyes / camera angle); the absolute threshold is only the cold-start fallback.
     """
+
+    _BASELINE_MIN_SAMPLES = 5
 
     def __init__(
         self,
@@ -62,17 +68,35 @@ class BlinkDetector:
         required_blinks: int,
         ear_closed_threshold: float,
         max_blinks_per_second: float,
+        ear_relative_drop: float = 0.25,
     ) -> None:
         self.required_blinks = required_blinks
         self._closed_thr = ear_closed_threshold
+        self._relative_drop = ear_relative_drop
         self._max_rate = max_blinks_per_second
+        self._ears: deque[float] = deque(maxlen=24)
+        self._baseline_was_ready = False
         self._was_closed = False
         self._blink_times: deque[float] = deque(maxlen=64)
         self.blinks = 0
         self.noise_detected = False
 
+    def _closed_threshold(self) -> float:
+        if len(self._ears) < self._BASELINE_MIN_SAMPLES:
+            return self._closed_thr
+        baseline = sorted(self._ears)[len(self._ears) // 2]  # median: robust to blink dips
+        return baseline * (1.0 - self._relative_drop)
+
     def update(self, ear: float, timestamp: float) -> None:
-        closed = ear < self._closed_thr
+        ready = len(self._ears) >= self._BASELINE_MIN_SAMPLES
+        closed = ear < self._closed_threshold()
+        self._ears.append(ear)
+        if ready and not self._baseline_was_ready:
+            # Absolute -> relative threshold switchover: resync state so users whose
+            # resting EAR sits below the absolute fallback don't get a phantom blink.
+            self._baseline_was_ready = True
+            self._was_closed = closed
+            return
         if self._was_closed and not closed:
             recent = [t for t in self._blink_times if timestamp - t <= 1.0]
             if len(recent) + 1 > self._max_rate:

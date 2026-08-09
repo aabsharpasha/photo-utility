@@ -153,6 +153,7 @@ class _StreamState:
                 required_blinks=session.required_blinks,
                 ear_closed_threshold=settings.liveness_session_ear_closed_threshold,
                 max_blinks_per_second=settings.liveness_session_max_blinks_per_second,
+                ear_relative_drop=settings.liveness_session_ear_relative_drop,
             )
         else:
             self.turn = HeadTurnDetector(

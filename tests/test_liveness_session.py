@@ -85,6 +85,33 @@ def test_blink_requires_reopen():
     assert not d.done
 
 
+def test_blink_relative_drop_catches_partial_closure():
+    """Baseline EAR 0.30 with dips only to 0.24: never crosses the absolute 0.20
+    threshold, but is a >25% drop below the rolling median -> must count."""
+    d = BlinkDetector(
+        required_blinks=1, ear_closed_threshold=0.2, max_blinks_per_second=8.0, ear_relative_drop=0.25
+    )
+    t = 0.0
+    for ear in (0.33, 0.33, 0.33, 0.33, 0.33, 0.24, 0.33):
+        d.update(ear, t)
+        t += 0.2
+    assert d.blinks == 1
+    assert d.done
+
+
+def test_blink_narrow_eyes_low_baseline_not_stuck_closed():
+    """Resting EAR 0.18 sits below the absolute threshold; the relative baseline
+    must adapt so normal open eyes are not treated as permanently closed."""
+    d = BlinkDetector(
+        required_blinks=1, ear_closed_threshold=0.2, max_blinks_per_second=8.0, ear_relative_drop=0.25
+    )
+    t = 0.0
+    for ear in (0.18, 0.18, 0.18, 0.18, 0.18, 0.18, 0.10, 0.18):
+        d.update(ear, t)
+        t += 0.2
+    assert d.blinks == 1
+
+
 def test_blink_noise_rejection_over_rate_limit():
     d = BlinkDetector(required_blinks=3, ear_closed_threshold=0.2, max_blinks_per_second=8.0)
     t = 0.0
