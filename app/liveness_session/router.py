@@ -74,7 +74,9 @@ async def create_session(
 ) -> SessionCreateResponse:
     settings = get_settings()
     challenge = secrets.choice(CHALLENGES)
-    required_blinks = secrets.choice((2, 3)) if challenge == "blink" else 0
+    # Fixed at 2: on slow cameras (~4 fps in dim rooms) each extra required blink is
+    # another chance to miss the closed-eye frame; 3 blinks made those devices flaky.
+    required_blinks = 2 if challenge == "blink" else 0
     session_id = uuid.uuid4().hex
     token = secrets.token_urlsafe(32)
     now = time.time()
